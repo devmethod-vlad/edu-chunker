@@ -1,10 +1,23 @@
 from __future__ import annotations
 
+"""Application settings loaded from environment variables.
+
+This module defines a small helper API to load configuration from the environment
+and provides a `Settings` dataclass encapsulating all configuration options.
+The settings are primarily consumed by the Confluence semantic preparation
+pipeline. If you add new configuration options be sure to update both the
+dataclass and the factory method accordingly.
+"""
+
 import os
 from dataclasses import dataclass
 
 
 def _env(name: str, default: str | None = None) -> str | None:
+    """Return the trimmed value of an environment variable or the given default.
+
+    Empty strings are treated as missing.
+    """
     v = os.getenv(name)
     if v is None:
         return default
@@ -13,6 +26,12 @@ def _env(name: str, default: str | None = None) -> str | None:
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """Parse an environment variable into a boolean.
+
+    Accepts typical truthy strings such as ``"1"``, ``"true"``, ``"yes"`` or
+    ``"on"``. Anything else (including absence) falls back to the provided
+    default.
+    """
     v = _env(name)
     if v is None:
         return default
@@ -20,6 +39,10 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _env_int(name: str, default: int) -> int:
+    """Parse an environment variable into an integer with a default.
+
+    If parsing fails the default is returned.
+    """
     v = _env(name)
     if v is None:
         return default
@@ -30,6 +53,11 @@ def _env_int(name: str, default: int) -> int:
 
 
 def _split_csv(v: str | None) -> list[str]:
+    """Split a comma separated environment variable into a list.
+
+    Leading and trailing whitespace on items is stripped and empty items are
+    omitted. Returns an empty list if the input is falsy.
+    """
     if not v:
         return []
     return [x.strip() for x in v.split(",") if x.strip()]
@@ -37,7 +65,9 @@ def _split_csv(v: str | None) -> list[str]:
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    # Confluence
+    """Strongly typed configuration for the Confluence semantic prep pipeline."""
+
+    # Confluence server connection details
     confluence_base_url: str
     confluence_rest_api_prefix: str
     confluence_use_anonymous: bool
@@ -48,7 +78,7 @@ class Settings:
     confluence_concurrency: int
     confluence_timeout_seconds: int
 
-    # Chunking/parsing
+    # Chunking/parsing parameters
     chunk_size_tokens: int
     chunk_min_tokens: int
     heading_levels_for_text: int
@@ -60,15 +90,30 @@ class Settings:
     token_count_strategy: str
     tokenizer_local_path: str | None
 
-    # Output
+    # Output configuration
     output_dir: str
     output_prefix: str
 
+    # Miscellaneous flags
+    enable_progress_bar: bool
+
     @staticmethod
     def from_env() -> "Settings":
-        from dotenv import load_dotenv
+        """Construct a Settings object by reading from the environment.
+
+        The python-dotenv package is used to load a ``.env`` file if present in
+        the working directory. Each configuration option has a sensible default
+        where appropriate. Required options raise a ``RuntimeError`` if not
+        provided.
+        """
+        from dotenv import load_dotenv  # type: ignore
+
+        # Load variables from .env file if present. This call is idempotent and
+        # safe to call multiple times.
         load_dotenv()
 
+        # Base URL for Confluence is mandatory because without it no HTTP
+        # requests can be made.
         base_url = _env("CONFLUENCE_BASE_URL")
         if not base_url:
             raise RuntimeError("CONFLUENCE_BASE_URL is required")
@@ -93,4 +138,5 @@ class Settings:
             tokenizer_local_path=_env("TOKENIZER_LOCAL_PATH"),
             output_dir=_env("OUTPUT_DIR", "./out") or "./out",
             output_prefix=_env("OUTPUT_PREFIX", "confluence_structured") or "confluence_structured",
+            enable_progress_bar=_env_bool("ENABLE_PROGRESS_BAR", False),
         )

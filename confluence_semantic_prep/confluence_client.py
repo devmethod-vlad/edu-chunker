@@ -16,6 +16,9 @@ class PageMeta:
     title: str
     space_key: str | None
     version: int | None
+    # ISO-like timestamp when the page was last modified. Comes from
+    # the page's version.when field or history.lastUpdated.when.
+    last_modified: str | None
     webui: str | None
 
 
@@ -56,7 +59,7 @@ class ConfluenceClient:
         results: list[PageMeta] = []
         start = 0
         limit = self.settings.confluence_page_list_limit
-        expand = "space,version,_links"
+        expand = "space,version,_links,history"
 
         while True:
             url = f"{self.api}/content"
@@ -74,11 +77,25 @@ class ConfluenceClient:
                 title = it.get("title") or ""
                 space_key = (it.get("space") or {}).get("key") if isinstance(it.get("space"), dict) else None
                 version = None
-                if isinstance(it.get("version"), dict):
-                    vn = it["version"].get("number")
+                last_modified: str | None = None
+                version_info = it.get("version")
+                if isinstance(version_info, dict):
+                    vn = version_info.get("number")
                     version = int(vn) if isinstance(vn, int) or (isinstance(vn, str) and vn.isdigit()) else None
+                    when = version_info.get("when")
+                    if isinstance(when, str) and when.strip():
+                        last_modified = when.strip()
+                # Fallback: history.lastUpdated.when
+                if not last_modified:
+                    hist = it.get("history") or {}
+                    if isinstance(hist, dict):
+                        last_upd = hist.get("lastUpdated") or {}
+                        if isinstance(last_upd, dict):
+                            when = last_upd.get("when")
+                            if isinstance(when, str) and when.strip():
+                                last_modified = when.strip()
                 webui = (it.get("_links") or {}).get("webui") if isinstance(it.get("_links"), dict) else None
-                results.append(PageMeta(page_id=pid, title=title, space_key=space_key, version=version, webui=webui))
+                results.append(PageMeta(page_id=pid, title=title, space_key=space_key, version=version, last_modified=last_modified, webui=webui))
 
             if len(items) < limit:
                 break
@@ -89,7 +106,7 @@ class ConfluenceClient:
 
     async def fetch_page_view(self, page_id: str) -> PageFull | None:
         url = f"{self.api}/content/{page_id}"
-        params = {"expand": "body.view,space,version,_links"}
+        params = {"expand": "body.view,space,version,_links,history"}
         r = await self.client.get(url, params=params)
         if r.status_code in (401, 403, 404):
             logger.info("Skip page %s (status=%s)", page_id, r.status_code)
@@ -100,9 +117,23 @@ class ConfluenceClient:
         title = data.get("title") or ""
         space_key = (data.get("space") or {}).get("key") if isinstance(data.get("space"), dict) else None
         version = None
-        if isinstance(data.get("version"), dict):
-            vn = data["version"].get("number")
+        last_modified: str | None = None
+        version_info = data.get("version")
+        if isinstance(version_info, dict):
+            vn = version_info.get("number")
             version = int(vn) if isinstance(vn, int) or (isinstance(vn, str) and vn.isdigit()) else None
+            when = version_info.get("when")
+            if isinstance(when, str) and when.strip():
+                last_modified = when.strip()
+        # Fallback to history.lastUpdated.when
+        if not last_modified:
+            hist = data.get("history") or {}
+            if isinstance(hist, dict):
+                last_upd = hist.get("lastUpdated") or {}
+                if isinstance(last_upd, dict):
+                    when = last_upd.get("when")
+                    if isinstance(when, str) and when.strip():
+                        last_modified = when.strip()
         webui = (data.get("_links") or {}).get("webui") if isinstance(data.get("_links"), dict) else None
 
         html = ""
@@ -116,4 +147,4 @@ class ConfluenceClient:
             logger.info("Page %s has empty body.view", page_id)
             return None
 
-        return PageFull(page_id=str(page_id), title=title, space_key=space_key, version=version, webui=webui, body_view_html=html)
+        return PageFull(page_id=str(page_id), title=title, space_key=space_key, version=version, last_modified=last_modified, webui=webui, body_view_html=html)

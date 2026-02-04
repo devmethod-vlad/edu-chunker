@@ -18,7 +18,7 @@ class Block:
     # 'EDU:{page_id}-{block_index}'
     block_id: str
 
-    # Parent/root tag of the block HTML (p, h2, div, ul/ol, table, blockquote, pre)
+    # Parent/root tag of the block HTML (p, h2, div, ul_li/ol_li, table_row, blockquote, pre)
     block_type: str
 
     # Heading hierarchy context at this block position
@@ -43,6 +43,19 @@ class Block:
 
     # Normalized plain text
     text: str
+
+    # Identifier of the parent block when this block is part of a grouped
+    # structure such as a list or table. For the first element in a group
+    # this is None. Child elements reference the block_id of the parent.
+    parent_block_id: str | None = None
+
+    # Metadata about the Confluence page this block originates from. The
+    # timestamp string comes from the page's version information ("when"
+    # field) and is left as-is (e.g. "2023-05-29T14:36:52.854+0000"). The
+    # version number is taken from the page's version.number. Both fields
+    # may be None when unavailable.
+    page_last_modified: str | None = None
+    page_version: int | None = None
 
 
 @dataclass(slots=True)
@@ -75,3 +88,8 @@ class Chunk:
 
     # Text that later goes to embedder: [PAGE]/[SECTION]/[TEXT] (depending on settings)
     text_for_embedding: str
+
+    # Metadata from the Confluence page. Each chunk inherits the same
+    # last modified timestamp and version as its constituent blocks.
+    page_last_modified: str | None = None
+    page_version: int | None = None

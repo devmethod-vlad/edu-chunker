@@ -61,7 +61,14 @@ class Chunker:
         space_key: str | None,
         page_title: str,
         drafts: list[BlockDraft],
+        page_last_modified: str | None,
+        page_version: int | None,
     ) -> ChunkingResult:
+        """Create blocks and chunks from a list of BlockDrafts.
+
+        Additional metadata about the page (last modified timestamp and version)
+        is passed in to attach to each block and chunk.
+        """
         final_blocks: list[Block] = []
         chunks: list[Chunk] = []
 
@@ -70,6 +77,11 @@ class Chunker:
         cur_text_parts: list[str] = []
         cur_html_parts: list[str] = []
         cur_md_parts: list[str] = []
+
+        # Mapping from group_uid (assigned in BlockDraft.group_uid) to the block_id
+        # of the first element in that group. Used to resolve parent_block_id on
+        # subsequent items.
+        uid_to_block_id: dict[str, str] = {}
 
         def cur_chunk_text() -> str:
             return normalize_text("\n".join(cur_text_parts))
@@ -132,6 +144,8 @@ class Chunker:
                     markdown=markdown,
                     chunk_text=chunk_text,
                     text_for_embedding=text_for_embedding,
+                    page_last_modified=page_last_modified,
+                    page_version=page_version,
                 )
             )
 
@@ -148,6 +162,16 @@ class Chunker:
             d = queue[i]
             i += 1
 
+            # Determine the parent block id if this draft belongs to a group
+            parent_block_id: str | None = None
+            if d.group_uid:
+                if d.parent_uid is None:
+                    # This is the first element in its group. Its block_id will be
+                    # recorded after creation so children can reference it.
+                    pass
+                else:
+                    parent_block_id = uid_to_block_id.get(d.parent_uid)
+
             # Create a new Block object (index assigned here)
             b = Block(
                 block_index=len(final_blocks),
@@ -162,7 +186,14 @@ class Chunker:
                 html=d.html,
                 markdown=d.markdown,
                 text=d.text,
+                parent_block_id=parent_block_id,
+                page_last_modified=page_last_modified,
+                page_version=page_version,
             )
+
+            # If this is the first element of a group, register its block id
+            if d.group_uid and d.parent_uid is None:
+                uid_to_block_id[d.group_uid] = b.block_id
 
             # If empty -> skip
             if not b.text:

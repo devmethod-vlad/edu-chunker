@@ -34,6 +34,9 @@ def _block_to_dict(b) -> dict:
         "html": b.html,
         "markdown": b.markdown,
         "text": b.text,
+        "parent_block_id": b.parent_block_id,
+        "page_last_modified": b.page_last_modified,
+        "page_version": b.page_version,
     }
 
 
@@ -52,6 +55,8 @@ def _chunk_to_dict(c) -> dict:
         "markdown": c.markdown,
         "chunk_text": c.chunk_text,
         "text_for_embedding": c.text_for_embedding,
+        "page_last_modified": c.page_last_modified,
+        "page_version": c.page_version,
     }
 
 
@@ -76,10 +81,23 @@ async def run_pipeline(settings: Settings) -> None:
 
         tasks = [asyncio.create_task(fetch_one(pid)) for pid in page_ids]
         pages: list[PageFull] = []
+
+        # Progress bar for fetching pages
+        if settings.enable_progress_bar:
+            from tqdm import tqdm
+            fetch_pbar = tqdm(total=len(tasks), desc="Fetching pages", unit="page")
+        else:
+            fetch_pbar = None
+
         for coro in asyncio.as_completed(tasks):
             p = await coro
             if p is not None:
                 pages.append(p)
+            if fetch_pbar:
+                fetch_pbar.update(1)
+
+        if fetch_pbar:
+            fetch_pbar.close()
 
         parser = HTMLToBlockDraftsParser(token_counter, settings.ignore_tags, settings.heading_levels_for_text)
         splitter = BlockSplitter(token_counter, settings.ignore_tags)
@@ -93,9 +111,24 @@ async def run_pipeline(settings: Settings) -> None:
         )
 
         out_pages: list[dict] = []
+
+        # Progress bar for processing pages
+        if settings.enable_progress_bar:
+            from tqdm import tqdm
+            process_pbar = tqdm(total=len(pages), desc="Processing pages", unit="page")
+        else:
+            process_pbar = None
+
         for p in pages:
             drafts = parser.parse(p.body_view_html)
-            chunked = chunker.chunk_page(p.page_id, p.space_key, p.title, drafts)
+            chunked = chunker.chunk_page(
+                p.page_id,
+                p.space_key,
+                p.title,
+                drafts,
+                p.last_modified,
+                p.version,
+            )
 
             out_pages.append(
                 {
@@ -104,6 +137,7 @@ async def run_pipeline(settings: Settings) -> None:
                         "title": p.title,
                         "space_key": p.space_key,
                         "version": p.version,
+                        "last_modified": p.last_modified,
                         "webui": p.webui,
                     },
                     "page_text_normalized": chunked.page_text_normalized,
@@ -111,6 +145,12 @@ async def run_pipeline(settings: Settings) -> None:
                     "chunks": [_chunk_to_dict(c) for c in chunked.chunks],
                 }
             )
+
+            if process_pbar:
+                process_pbar.update(1)
+
+        if process_pbar:
+            process_pbar.close()
 
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
         out_path = Path(settings.output_dir) / f"{settings.output_prefix}_{ts}.json"
@@ -128,6 +168,8 @@ async def run_pipeline(settings: Settings) -> None:
             "pages_count": len(out_pages),
             "pages": out_pages,
         }
+        # Ensure output directory exists
+        Path(settings.output_dir).mkdir(parents=True, exist_ok=True)
         out_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         logger.info("Wrote %s", out_path)
 

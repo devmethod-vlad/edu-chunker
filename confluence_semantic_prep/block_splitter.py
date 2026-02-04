@@ -63,8 +63,10 @@ class BlockSplitter:
     """Splits a draft into smaller drafts while preserving minimal valid HTML.
 
     Special cases:
-    - list item drafts have root tag ul/ol and one <li> inside -> keep that wrapper
-    - table row drafts have root tag <table> with header (optional) + one data <tr> -> keep header in each part
+    - list item drafts have root tag ul|ol and one <li> inside -> keep that wrapper
+      and maintain the list/table grouping metadata (parent_uid, group_uid).
+    - table row drafts have root tag <table> with header (optional) + one data <tr>
+      -> keep header in each part and maintain grouping metadata.
     """
 
     def __init__(self, token_counter: TokenCounter, ignore_tags: Iterable[str]) -> None:
@@ -100,6 +102,8 @@ class BlockSplitter:
 
         This is a best-effort implementation of 2.8.2.1 concept:
         we descend into direct child block tags and return them as separate drafts.
+        The grouping metadata (parent_uid, group_uid) of the input draft is
+        preserved on all produced drafts.
         """
         soup = BeautifulSoup(draft.html, "lxml")
         root = soup.find(True)
@@ -124,7 +128,7 @@ class BlockSplitter:
                     continue
                 out.append(
                     BlockDraft(
-                        block_type=root_name,
+                        block_type=f"{root_name}_li",
                         html=html_piece,
                         markdown=markdownify_html(html_piece),
                         text=txt,
@@ -132,6 +136,8 @@ class BlockSplitter:
                         heading_path_full=draft.heading_path_full,
                         heading_path_text=draft.heading_path_text,
                         nearest_heading_id=draft.nearest_heading_id,
+                        parent_uid=draft.parent_uid,
+                        group_uid=draft.group_uid,
                     )
                 )
             return out or None
@@ -154,7 +160,7 @@ class BlockSplitter:
                         continue
                     out.append(
                         BlockDraft(
-                            block_type=name,
+                            block_type=f"{name}_li",
                             html=html_piece,
                             markdown=markdownify_html(html_piece),
                             text=txt,
@@ -162,6 +168,8 @@ class BlockSplitter:
                             heading_path_full=draft.heading_path_full,
                             heading_path_text=draft.heading_path_text,
                             nearest_heading_id=draft.nearest_heading_id,
+                            parent_uid=draft.parent_uid,
+                            group_uid=draft.group_uid,
                         )
                     )
             elif name == "table":
@@ -179,7 +187,7 @@ class BlockSplitter:
                         continue
                     out.append(
                         BlockDraft(
-                            block_type="table",
+                            block_type="table_row",
                             html=html_piece,
                             markdown=markdownify_html(html_piece),
                             text=txt,
@@ -187,6 +195,8 @@ class BlockSplitter:
                             heading_path_full=draft.heading_path_full,
                             heading_path_text=draft.heading_path_text,
                             nearest_heading_id=draft.nearest_heading_id,
+                            parent_uid=draft.parent_uid,
+                            group_uid=draft.group_uid,
                         )
                     )
             else:
@@ -204,6 +214,8 @@ class BlockSplitter:
                         heading_path_full=draft.heading_path_full,
                         heading_path_text=draft.heading_path_text,
                         nearest_heading_id=draft.nearest_heading_id,
+                        parent_uid=draft.parent_uid,
+                        group_uid=draft.group_uid,
                     )
                 )
 
@@ -213,9 +225,9 @@ class BlockSplitter:
         """Split draft.text into two parts by sentence spans so that the first fits into token_budget.
 
         HTML wrappers:
-        - ul/ol: wrap parts into <ul/ol><li>...</li></ul/ol>
-        - table: wrap into <table>{header}<tr><td colspan=N>...</td></tr></table>
-        - else: wrap into same outer tag
+        - ul_li/ol_li: wrap parts into <ul>/<ol><li>...</li></ul>
+        - table_row: wrap into <table>{header}<tr><td colspan=N>...</td></tr></table>
+        - generic tags: wrap into same outer tag
         """
         if token_budget < 30:
             return None
@@ -251,10 +263,11 @@ class BlockSplitter:
     def _rebuild_draft_with_text(self, draft: BlockDraft, new_text: str) -> BlockDraft:
         bt = draft.block_type.lower()
 
-        if bt in {"ul", "ol"}:
+        if bt in {"ul_li", "ol_li"}:
+            list_tag = bt.split("_", 1)[0]
             safe = html.escape(new_text)
-            html_block = f"<{bt}><li>{safe}</li></{bt}>"
-        elif bt == "table":
+            html_block = f"<{list_tag}><li>{safe}</li></{list_tag}>"
+        elif bt == "table_row":
             header = _extract_table_header_html(draft.html)
             cols = _count_table_columns(draft.html)
             safe = html.escape(new_text)
@@ -263,6 +276,7 @@ class BlockSplitter:
             safe = html.escape(new_text)
             html_block = f"<{bt}>{safe}</{bt}>"
         else:
+            # generic fallback
             safe = html.escape(new_text)
             html_block = f"<p>{safe}</p>"
             bt = "p"
@@ -277,4 +291,6 @@ class BlockSplitter:
             heading_path_full=draft.heading_path_full,
             heading_path_text=draft.heading_path_text,
             nearest_heading_id=draft.nearest_heading_id,
+            parent_uid=draft.parent_uid,
+            group_uid=draft.group_uid,
         )
