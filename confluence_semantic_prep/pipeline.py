@@ -1,26 +1,49 @@
 from __future__ import annotations
 
+"""Pipeline for crawling Confluence pages and producing chunked output.
+
+This module orchestrates the entire extraction process: it fetches pages via
+the Confluence client, parses them into block drafts, splits oversized
+blocks, chunks the resulting blocks, and writes the final payload to disk.
+The pipeline here is largely a copy of the original implementation from
+``edu-chunker`` but has been updated to handle the new ``attributes`` field
+on blocks. When serialising blocks for output we include the ``attributes``
+mapping so that downstream consumers can reconstruct the original HTML
+structure faithfully.
+"""
+
 import asyncio
 import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any, Dict, List
 
 from .block_splitter import BlockSplitter
 from .chunker import Chunker
 from .confluence_client import ConfluenceClient, PageFull
 from .html_parser import HTMLToBlockDraftsParser
+from .models import Block, Chunk, Heading
 from .settings import Settings
 from .tokenizer import TokenCounter
 
 logger = logging.getLogger(__name__)
 
 
-def _h_to_dict(h) -> dict:
+def _h_to_dict(h: Heading) -> Dict[str, Any]:
+    """Serialise a Heading dataclass into a plain dictionary."""
     return {"level": h.level, "text": h.text, "html_id": h.html_id}
 
 
-def _block_to_dict(b) -> dict:
+def _block_to_dict(b: Block) -> Dict[str, Any]:
+    """Serialise a Block dataclass into a dictionary for JSON output.
+
+    In addition to the original fields, this function now includes the
+    ``attributes`` mapping which captures HTML attributes present on the
+    source tag. Without this, clients would lose information such as CSS
+    classes, styles or table configuration that may be necessary to
+    reassemble valid HTML when rendering chunks.
+    """
     return {
         "block_index": b.block_index,
         "block_id": b.block_id,
@@ -35,12 +58,14 @@ def _block_to_dict(b) -> dict:
         "markdown": b.markdown,
         "text": b.text,
         "parent_block_id": b.parent_block_id,
+        "attributes": b.attributes,
         "page_last_modified": b.page_last_modified,
         "page_version": b.page_version,
     }
 
 
-def _chunk_to_dict(c) -> dict:
+def _chunk_to_dict(c: Chunk) -> Dict[str, Any]:
+    """Serialise a Chunk dataclass into a dictionary for JSON output."""
     return {
         "chunk_id": c.chunk_id,
         "page_id": c.page_id,
@@ -61,10 +86,24 @@ def _chunk_to_dict(c) -> dict:
 
 
 async def run_pipeline(settings: Settings) -> None:
+    """Entrypoint for the Confluence semantic chunker.
+
+    Given a Settings object, this function will:
+    1. Create a token counter according to the specified strategy.
+    2. Fetch the list of pages to process (all pages or filtered by ID).
+    3. For each page, parse its HTML into block drafts, split oversized
+       drafts, chunk the resulting blocks and collect the results.
+    4. Assemble a payload capturing metadata, blocks and chunks for all
+       processed pages and write it to JSON in the configured output
+       directory.
+
+    The function includes progress bar support when enabled via settings.
+    """
     token_counter = TokenCounter.from_settings(settings.token_count_strategy, settings.tokenizer_local_path)
 
     client = ConfluenceClient(settings)
     try:
+        # Determine which pages to process
         if settings.confluence_page_ids:
             page_ids = settings.confluence_page_ids
             logger.info("Using CONFLUENCE_PAGE_ID filter (%d ids)", len(page_ids))
@@ -79,12 +118,13 @@ async def run_pipeline(settings: Settings) -> None:
             async with sem:
                 return await client.fetch_page_view(pid)
 
+        # Launch concurrent fetch tasks
         tasks = [asyncio.create_task(fetch_one(pid)) for pid in page_ids]
-        pages: list[PageFull] = []
+        pages: List[PageFull] = []
 
-        # Progress bar for fetching pages
+        # Optional progress bar for fetching pages
         if settings.enable_progress_bar:
-            from tqdm import tqdm
+            from tqdm import tqdm  # type: ignore
             fetch_pbar = tqdm(total=len(tasks), desc="Fetching pages", unit="page")
         else:
             fetch_pbar = None
@@ -108,13 +148,15 @@ async def run_pipeline(settings: Settings) -> None:
             chunk_min_tokens=settings.chunk_min_tokens,
             add_page_prefix=settings.add_page_prefix,
             add_section_prefix=settings.add_section_prefix,
+            heading_levels_for_text=settings.heading_levels_for_text,
+            chunk_overlap_tokens=settings.chunk_overlap_tokens,
         )
 
-        out_pages: list[dict] = []
+        out_pages: List[Dict[str, Any]] = []
 
-        # Progress bar for processing pages
+        # Optional progress bar for processing pages
         if settings.enable_progress_bar:
-            from tqdm import tqdm
+            from tqdm import tqdm  # type: ignore
             process_pbar = tqdm(total=len(pages), desc="Processing pages", unit="page")
         else:
             process_pbar = None
@@ -152,13 +194,15 @@ async def run_pipeline(settings: Settings) -> None:
         if process_pbar:
             process_pbar.close()
 
+        # Prepare output payload
         ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%SZ")
         out_path = Path(settings.output_dir) / f"{settings.output_prefix}_{ts}.json"
-        payload = {
+        payload: Dict[str, Any] = {
             "generated_at": ts,
             "settings": {
                 "chunk_size_tokens": settings.chunk_size_tokens,
                 "chunk_min_tokens": settings.chunk_min_tokens,
+                "chunk_overlap_tokens": settings.chunk_overlap_tokens,
                 "heading_levels_for_text": settings.heading_levels_for_text,
                 "add_page_prefix": settings.add_page_prefix,
                 "add_section_prefix": settings.add_section_prefix,

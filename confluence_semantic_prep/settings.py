@@ -81,6 +81,7 @@ class Settings:
     # Chunking/parsing parameters
     chunk_size_tokens: int
     chunk_min_tokens: int
+    chunk_overlap_tokens: int
     heading_levels_for_text: int
     add_page_prefix: bool
     add_section_prefix: bool
@@ -130,6 +131,7 @@ class Settings:
             confluence_timeout_seconds=_env_int("CONFLUENCE_TIMEOUT_SECONDS", 30),
             chunk_size_tokens=_env_int("CHUNK_SIZE_TOKENS", 512),
             chunk_min_tokens=_env_int("CHUNK_MIN_TOKENS", 120),
+            chunk_overlap_tokens=_env_int("CHUNK_OVERLAP_TOKENS", 0),
             heading_levels_for_text=_env_int("HEADING_LEVELS_FOR_TEXT", 2),
             add_page_prefix=_env_bool("ADD_PAGE_PREFIX", True),
             add_section_prefix=_env_bool("ADD_SECTION_PREFIX", True),
