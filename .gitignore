@@ -10,10 +10,11 @@ logs
 .pytest_cache
 .mypy_cache
 .ruff_cache
-.env_example
+.env
 venv
 __pycache__
 /tests/tmp
 celerybeat-schedule
 poetry.lock
 /models/
+/output/
