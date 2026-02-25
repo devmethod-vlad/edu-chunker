@@ -17,6 +17,9 @@ class ConfluencePage:
     id: str
     title: str
     space_key: str
+    # Человекочитаемое имя пространства (space.name)
+    # Важно для UI/выдачи, чтобы не показывать пользователю один только key.
+    space_name: str
     version: int
     last_modified: str
     # HTML-контент страницы (body.view — то, что видит пользователь)
@@ -42,11 +45,43 @@ class ConfluencePage:
             id=str(data.get('id', '')),
             title=data.get('title', ''),
             space_key=data.get('space', {}).get('key', ''),
+            space_name=data.get('space', {}).get('name', ''),
             version=data.get('version', {}).get('number', 1),
             last_modified=data.get('version', {}).get('when', ''),
             body_html=html,
             url=data.get('_links', {}).get('webui', ''),
         )
+
+    def to_page_info(self) -> Dict[str, Any]:
+        """Короткая мета-информация о странице для результирующего вывода.
+
+        Зачем это нужно:
+        - В выдаче результатов поиска часто нужно показать данные о странице
+          (название, пространство, версия и т.д.) без необходимости
+          разбирать их из каждого чанка.
+        - При переходе на запись в БД это станет естественной "таблицей страниц".
+
+        Возвращаемые поля соответствуют требованиям:
+        - название страницы
+        - id страницы
+        - название пространства
+        - время последнего изменения
+        - версия страницы
+
+        Дополнительно (не мешает требованиям): сохраняем space_key внутри объекта space,
+        так как key почти всегда нужен для интеграций и дальнейшей нормализации.
+        """
+
+        return {
+            "page_id": self.id,
+            "page_title": self.title,
+            "space": {
+                "key": self.space_key,
+                "name": self.space_name,
+            },
+            "last_modified": self.last_modified,
+            "page_version": self.version,
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -98,7 +133,27 @@ class ContentBlock:
         self.text_length = len(self.text)
 
     def to_dict(self) -> Dict[str, Any]:
+        # Важно для режима обработки *нескольких* страниц:
+        # индекс блока (index) начинается с 0 для каждой страницы.
+        # Если выгружать blocks одним общим массивом, то без page_id
+        # индексы начинают "сталкиваться" между страницами и внешние
+        # анализаторы могут ошибочно сопоставлять chunk.block_indices
+        # с блоками другой страницы.
+        #
+        # Чтобы это не происходило, добавляем page_id явным полем.
+        # Его можно восстановить и из block.id (EDU:{page_id}-{index}),
+        # но лучше сделать это один раз на стороне генератора.
+        page_id = None
+        try:
+            if isinstance(self.id, str) and self.id.startswith('EDU:'):
+                # EDU:{page_id}-{index}
+                rest = self.id[4:]
+                page_id = rest.rsplit('-', 1)[0]
+        except Exception:
+            page_id = None
+
         return {
+            'page_id': page_id,
             'index': self.index,
             'id': self.id,
             'block_type': self.block_type,
@@ -186,6 +241,16 @@ class Chunk:
     highlight_metadata: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
+        # Блоковые индексы в чанке (block_indices/core/overlap_*) — это индексы
+        # ОТ НАЧАЛА СТРАНИЦЫ. В режиме обработки нескольких страниц индексы
+        # пересекаются (у каждой страницы свой 0..N-1), поэтому для удобства
+        # отладки/внешней сборки добавляем также явные block_id списки.
+        #
+        # Это не ломает требования (индексы сохраняются), но делает данные
+        # однозначными без дополнительного парсинга.
+        def _ids(indices: List[int]) -> List[str]:
+            return [f"EDU:{self.page_id}-{i}" for i in (indices or [])]
+
         return {
             'chunk_id': self.chunk_id,
             'page_id': self.page_id,
@@ -194,9 +259,13 @@ class Chunk:
             'page_version': self.page_version,
             'last_modified': self.last_modified,
             'block_indices': self.block_indices,
+            'block_ids': _ids(self.block_indices),
             'core_block_indices': self.core_block_indices,
+            'core_block_ids': _ids(self.core_block_indices),
             'overlap_prev_block_indices': self.overlap_prev_block_indices,
+            'overlap_prev_block_ids': _ids(self.overlap_prev_block_indices),
             'overlap_next_block_indices': self.overlap_next_block_indices,
+            'overlap_next_block_ids': _ids(self.overlap_next_block_indices),
             'full_heading_hierarchy': self.full_heading_hierarchy,
             'text_heading_hierarchy': self.text_heading_hierarchy,
             'nearest_heading_id': self.nearest_heading_id,

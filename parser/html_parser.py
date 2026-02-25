@@ -286,7 +286,11 @@ class HTMLParser:
                     ctag = child.name.lower()
                     if ctag in ('ul', 'ol'):
                         _flush()
-                        self._process_list(child, page_id, li_x, li_c)
+                        # Вложенный список: важно ДОБАВИТЬ сегмент самого <ul>/<ol>
+                        # в XPath/CSS, иначе мы теряем часть пути (и навигация ломается).
+                        nested_x = li_x + [self._xpath_segment(child)]
+                        nested_c = li_c + [self._css_segment(child)]
+                        self._process_list(child, page_id, nested_x, nested_c)
                     else:
                         t = self._extract_text(child)
                         if t:
@@ -305,9 +309,36 @@ class HTMLParser:
         xpath_parts: List[str],
         css_parts: List[str],
     ) -> None:
-        """Разбиение таблицы на строки (tr). Ячейки — слева направо через ' | '."""
-        for row_idx, row in enumerate(table_el.find_all('tr')):
-            cells = row.find_all(['td', 'th'])
+        """Разбиение таблицы на строки (tr). Ячейки — слева направо через ' | '.
+
+        ВАЖНО:
+          - Мы НЕ используем find_all('tr') без ограничений, потому что это
+            захватывает строки вложенных таблиц и приводит к дублированию контента.
+          - Поэтому берём только строки верхнего уровня (внутри thead/tbody/tfoot
+            или непосредственно в table).
+        """
+
+        # Сначала пытаемся обойти секции таблицы (thead/tbody/tfoot)
+        sections = table_el.find_all(['thead', 'tbody', 'tfoot'], recursive=False)
+        if sections:
+            rows_with_paths: List[Tuple[Tag, List[str], List[str]]] = []
+            for sec in sections:
+                sec_x = xpath_parts + [self._xpath_segment(sec)]
+                sec_c = css_parts + [self._css_segment(sec)]
+                for row in sec.find_all('tr', recursive=False):
+                    row_x = sec_x + [self._xpath_segment(row)]
+                    row_c = sec_c + [self._css_segment(row)]
+                    rows_with_paths.append((row, row_x, row_c))
+        else:
+            rows_with_paths = []
+            for row in table_el.find_all('tr', recursive=False):
+                row_x = xpath_parts + [self._xpath_segment(row)]
+                row_c = css_parts + [self._css_segment(row)]
+                rows_with_paths.append((row, row_x, row_c))
+
+        for row, row_x, row_c in rows_with_paths:
+            # Ячейки только верхнего уровня, чтобы не вытащить td/th из вложенных таблиц
+            cells = row.find_all(['td', 'th'], recursive=False)
             if not cells:
                 continue
 
@@ -319,8 +350,6 @@ class HTMLParser:
 
             if parts:
                 row_text = ' | '.join(parts)
-                row_x = xpath_parts + [f'tr[{row_idx + 1}]']
-                row_c = css_parts + [f'tr:nth-of-type({row_idx + 1})']
                 self._create_block(row_text, 'tr', page_id, row_x, row_c, row)
 
     # ------------------------------------------------------------------
@@ -367,17 +396,82 @@ class HTMLParser:
         """
         Извлечение и нормализация текста из элемента.
 
-        Используем get_text() БЕЗ separator — это позволяет корректно
-        обрабатывать случаи когда инлайн-теги разрывают слово:
-          <strong>Э</strong><strong>моциональное</strong> → «Эмоциональное»
-        а не «Э моциональное» (как было бы с separator=' ').
+        Важный нюанс:
+          - BeautifulSoup.get_text(separator=' ') удобно разделяет текст между
+            соседними блочными элементами (<p>...</p><p>...</p>), но может вставлять
+            пробелы между инлайн-тегами, разрывающими слово:
+              <strong>Э</strong><strong>моциональное</strong> → «Э моциональное»
+          - get_text() без separator сохраняет такие слова, но может СКЛЕИВАТЬ абзацы
+            внутри одного контейнера (особенно в <td>/<th>), например:
+              «...ЛН/ЭЛН.</p><p>2.» → «...ЛН/ЭЛН.2.»
+
+        Поэтому здесь используется гибридный подход:
+          - мы собираем текст вручную в порядке чтения,
+          - добавляем разделитель ТОЛЬКО при встрече вложенных блочных тегов
+            (из BLOCK_TAGS), чтобы не склеивать абзацы и элементы списков,
+          - при этом не вставляем пробелы между инлайн-частями слов.
 
         <br> заменяется на пробел ещё до вызова этого метода (в parse()).
         """
-        raw = element.get_text()
+        block_tags = set(settings.BLOCK_TAGS)
+
+        parts: List[str] = []
+        last_was_sep = True  # чтобы не плодить разделители подряд
+
+        for node in element.descendants:
+            if isinstance(node, NavigableString):
+                t = str(node)
+                if not t:
+                    continue
+
+                # NBSP в BeautifulSoup приходит как '\xa0' (неразрывный пробел).
+                # Ранее такие узлы отбрасывались условием `not t.strip()`,
+                # из-за чего пропадали пробелы между словами в конструкциях вида:
+                #   "кнопку<span>&nbsp;</span><strong>Продолжить</strong>"
+                # Браузер рендерит &nbsp; как пробел, поэтому и мы сохраняем
+                # разделитель (но аккуратно, чтобы не плодить лишние пробелы).
+                t = t.replace(NBSP, ' ')
+
+                if not t.strip():
+                    # Пробельный узел: сохраняем ОДИН пробел, если он действительно
+                    # нужен как разделитель между соседними текстовыми фрагментами.
+                    if parts:
+                        last = parts[-1]
+                        if last and last[-1] not in (' ', '\n'):
+                            parts.append(' ')
+                    continue
+
+                parts.append(t)
+                last_was_sep = False
+                continue
+
+            if isinstance(node, Tag):
+                name = node.name.lower()
+
+                # <br> обычно уже заменён в parse(), но оставим на всякий случай
+                if name == 'br':
+                    if not last_was_sep:
+                        parts.append('\n')
+                        last_was_sep = True
+                    continue
+
+                # Вложенный блочный тег внутри текущего элемента — ставим разделитель
+                # между «абзацами» / «строками» / «пунктами», чтобы не склеивать текст.
+                if node is not element and name in block_tags:
+                    if not last_was_sep:
+                        parts.append('\n')
+                        last_was_sep = True
+
+        raw = ''.join(parts)
+
+        # Нормализация whitespace
         raw = raw.replace(NBSP, ' ')
-        raw = _WS.sub(' ', raw)           # множественные пробелы → один
-        raw = _MULTI_NL.sub('\n\n', raw)   # лишние переносы
+        raw = raw.replace('\r', '\n')
+        raw = re.sub(r'[ \t]*\n[ \t]*', '\n', raw)  # trim вокруг переносов
+        raw = _MULTI_NL.sub('\n\n', raw)            # лишние переносы
+        raw = raw.replace('\n', ' ')               # переносы → пробелы
+        raw = _WS.sub(' ', raw)                    # множественные пробелы → один
+
         return raw.strip()
 
     # ------------------------------------------------------------------

@@ -10,6 +10,7 @@
 
 import asyncio
 from typing import List, Optional, Dict, Any
+from typing import AsyncIterator
 
 import httpx
 
@@ -43,6 +44,7 @@ class ConfluenceAPIClient:
         self.max_retries = max_retries
 
         # Семафор для ограничения конкурентности
+        self._max_concurrent = max_concurrent
         self._semaphore = asyncio.Semaphore(max_concurrent)
 
         # Заголовки
@@ -169,6 +171,41 @@ class ConfluenceAPIClient:
         logger.info(f"Found {len(page_ids)} pages")
         return page_ids
 
+    async def iter_all_page_ids(self) -> AsyncIterator[str]:
+        """Потоковое получение ID всех доступных страниц.
+
+        Зачем это нужно:
+        - На больших порталах хранить весь список IDs в памяти может быть нежелательно.
+        - Для пайплайна (fetch -> parse -> write) удобнее получать IDs "на лету".
+
+        Реализация:
+        - Пагинация через start/limit
+        - yield каждого page_id по мере получения пачки
+        """
+        start = 0
+        limit = 100
+
+        logger.info("Streaming list of all available pages…")
+
+        while True:
+            data = await self._request('GET', '/rest/api/content', params={
+                'type': 'page',
+                'limit': limit,
+                'start': start,
+                'expand': 'space',
+            })
+
+            results = data.get('results', [])
+            if not results:
+                break
+
+            for item in results:
+                yield str(item['id'])
+
+            if len(results) < limit:
+                break
+            start += limit
+
     # ------------------------------------------------------------------
     # Получение контента одной страницы
     # ------------------------------------------------------------------
@@ -211,9 +248,21 @@ class ConfluenceAPIClient:
         Параллельное получение нескольких страниц.
         """
         with timer.measure("fetch_pages_batch"):
-            tasks = [self.get_page(pid) for pid in page_ids]
-            pages = await asyncio.gather(*tasks)
-            return [p for p in pages if p is not None]
+            # Важно: не создаём по задаче на КАЖДУЮ страницу сразу —
+            # на больших порталах это легко съедает память.
+            #
+            # Вместо этого идём "окнами": внутри окна параллелим,
+            # конкурентность всё равно ограничена семафором.
+            window = max(1, self._max_concurrent * 10)
+            out: List[ConfluencePage] = []
+
+            for start in range(0, len(page_ids), window):
+                batch = page_ids[start:start + window]
+                tasks = [self.get_page(pid) for pid in batch]
+                pages = await asyncio.gather(*tasks)
+                out.extend([p for p in pages if p is not None])
+
+            return out
 
 
 # ---------------------------------------------------------------------------
